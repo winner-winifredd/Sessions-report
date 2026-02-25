@@ -48,8 +48,9 @@ export async function GET(): Promise<NextResponse<ProcessedApiResponse>> {
       .flat()
       .map((c) => String(c || "").trim())
       .filter((id) => id && id.length > 10 && !id.startsWith("File ID"));
+    const uniqueIds = Array.from(new Set<string>(fileIds));
     return NextResponse.json({
-      processedFileIds: [...new Set(fileIds)],
+      processedFileIds: uniqueIds,
       lastUpdated: new Date().toISOString(),
     });
   } catch {

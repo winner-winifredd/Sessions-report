@@ -44,7 +44,7 @@ export default function LoginPage() {
           </div>
           <h1 className="text-lg font-semibold text-white">Sign in to Session Reports</h1>
           <p className="mt-1 text-xs text-slate-500">
-            Use the email and password configured in the `SessionReports_Config` sheet.
+            Contact an admin for valid login credentials.
           </p>
         </div>
 
