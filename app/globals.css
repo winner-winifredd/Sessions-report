@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0c1116;
+  --card: #141b22;
+  --border: #1e2930;
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --accent: #14b8a6;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --error: #f87171;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-feature-settings: "rlig" 1, "calt" 1;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Table row hover */
+.table-row-hover:hover {
+  background: rgba(20, 184, 166, 0.06);
+}
+
+/* Badge pulse for needs-review */
+.badge-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse {
+  50% { opacity: 0.8; }
+}
