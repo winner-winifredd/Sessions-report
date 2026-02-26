@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useRef } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   FileSpreadsheet,
@@ -56,6 +56,16 @@ const ALL_COLUMNS: { key: keyof SessionReportRow; label: string }[] = [
 
 type Theme = "light" | "dark";
 
+function RootLayout({
+  className,
+  children,
+}: {
+  className: string;
+  children: React.ReactNode;
+}) {
+  return <div className={className}>{children}</div>;
+}
+
 // Dropdown options mirrored from Apps Script validations (ensureInsuranceAndBilledValidation_)
 const INSURANCE_OPTIONS = [
   "Aetna",
@@ -82,8 +92,6 @@ const BILLED_OPTIONS = [
 ];
 
 const DNS_OPTIONS = ["Missing Forms", "Inactive Insurance", "Unpaid Balances", "CC Declined"];
-
-const DURATION_OPTIONS = ["5", "10", "15", "20", "30", "40", "45", "50", "60", "75", "90"];
 
 const WHERE_TO_BILL_OPTIONS = ["Headway", "Lytec (Intake Only)", "Lytec (Follow-ups Only)", "Self Pay"];
 
@@ -280,9 +288,9 @@ export default function Home() {
   const [filterWhereToBill, setFilterWhereToBill] = useState<string>("");
   const [filterBilled, setFilterBilled] = useState<string>("");
   const [filterApptType, setFilterApptType] = useState<string>("");
+  const [filterReportRunDate, setFilterReportRunDate] = useState<string>("");
   const [filterInsurance, setFilterInsurance] = useState<string>("");
   const [filterDnsReason, setFilterDnsReason] = useState<string>("");
-  const [filterDuration, setFilterDuration] = useState<string>("");
   const [filterAutoWhereToBill, setFilterAutoWhereToBill] = useState<string>("");
   const [showFinalOnly, setShowFinalOnly] = useState(false);
   const [page, setPage] = useState(1);
@@ -295,7 +303,22 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/sheets");
+      // 1) Best-effort: trigger Apps Script engine for this sheet/tab.
+      //    The backend route uses the session to send sheetId/tabName.
+      try {
+        await fetch("/api/trigger-engine", { method: "POST" });
+      } catch {
+        // ignore trigger errors; we'll still try to read the sheet
+      }
+
+      // 2) Read latest rows from the sheet
+      const res = await fetch("/api/sheets", {
+        method: "GET",
+        cache: "no-store",
+        headers: {
+          "Cache-Control": "no-cache",
+        },
+      });
       if (res.status === 401) {
         // Not authenticated, send to login page
         router.push("/login");
@@ -376,6 +399,11 @@ export default function Home() {
     return Array.from(set).sort();
   }, [rows]);
 
+  const reportRunDateOptions = useMemo(() => {
+    const set = new Set(rows.map((r) => r.reportRunDate).filter(Boolean));
+    return Array.from(set).sort();
+  }, [rows]);
+
   const filtered = useMemo(() => {
     let list = rows;
     if (search.trim()) {
@@ -389,12 +417,12 @@ export default function Home() {
           r.note?.toLowerCase().includes(q)
       );
     }
+    if (filterReportRunDate) list = list.filter((r) => r.reportRunDate === filterReportRunDate);
     if (filterInsurance) list = list.filter((r) => r.insurance === filterInsurance);
     if (filterWhereToBill) list = list.filter((r) => r.whereToBill === filterWhereToBill);
     if (filterAutoWhereToBill) list = list.filter((r) => r.autoWhereToBill === filterAutoWhereToBill);
     if (filterBilled) list = list.filter((r) => r.billed === filterBilled);
     if (filterDnsReason) list = list.filter((r) => r.dnsReason === filterDnsReason);
-    if (filterDuration) list = list.filter((r) => r.duration === filterDuration);
     if (filterApptType) list = list.filter((r) => r.apptType === filterApptType);
     if (showFinalOnly) list = list.filter((r) => String(r.finalRowFlag).toLowerCase() === "true");
     return list;
@@ -447,13 +475,15 @@ export default function Home() {
     }
   };
 
-  return (
-    <div
-      className={
-        "min-h-screen " +
-        (isDark ? "bg-[#0c1116] text-slate-200" : "bg-slate-50 text-slate-900")
-      }
-    >
+  const rootClassName =
+    "min-h-screen " +
+    (isDark ? "bg-[#0c1116] text-slate-200" : "bg-slate-50 text-slate-900");
+
+  const canGoPrev = currentPage >= 2;
+  const canGoNext = currentPage < totalPages;
+
+  const main = (
+    <RootLayout className={rootClassName}>
       {/* Header */}
       <header
         className={
@@ -559,277 +589,277 @@ export default function Home() {
         )}
 
         {/* Summary cards */}
-        <div className="mb-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Card
-            icon={<FileSpreadsheet className="h-5 w-5 text-teal-400" />}
-            label="Total rows"
-            value={String(filtered.length)}
-            sub={lastUpdated ? `Sheet updated: ${new Date(lastUpdated).toLocaleString()}` : "—"}
-          />
-          <Card
-            icon={<AlertCircle className="h-5 w-5 text-amber-400" />}
-            label="Needs review"
-            value={String(needsReview.length)}
-            sub={needsReview.length ? "Missing notes / audit issues" : "None"}
-          />
-          <Card
-            icon={<CheckCircle2 className="h-5 w-5 text-emerald-400" />}
-            label="Final rows"
-            value={String(filtered.filter((r) => String(r.finalRowFlag).toLowerCase() === "true").length)}
-            sub="Unique appointments (last run)"
-          />
-          <Card
-            icon={<Building2 className="h-5 w-5 text-sky-400" />}
-            label="Data source"
-            value="Google Sheet"
-            sub="Read-only · processing stays in Apps Script"
-          />
-        </div>
+          <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <Card
+              icon={<FileSpreadsheet className="h-5 w-5 text-teal-400" />}
+              label="Total rows"
+              value={String(rows.length)}
+              sub={lastUpdated ? `Sheet updated: ${new Date(lastUpdated).toLocaleString()}` : "—"}
+            />
+            <Card
+              icon={<AlertCircle className="h-5 w-5 text-amber-400" />}
+              label="Needs review"
+              value={String(needsReview.length)}
+              sub={needsReview.length ? "Missing notes / audit issues" : "None"}
+            />
+            <Card
+              icon={<CheckCircle2 className="h-5 w-5 text-emerald-400" />}
+              label="Final rows"
+              value={String(filtered.filter((r) => String(r.finalRowFlag).toLowerCase() === "true").length)}
+              sub="Unique appointments (last run)"
+            />
+            <Card
+              icon={<Building2 className="h-5 w-5 text-sky-400" />}
+              label="Data source"
+              value="Google Sheet"
+              sub="Read-only with Edit access."
+            />
+          </div>
 
-        {/* Filters */}
-        <div
-          className={
-            "mb-6 flex flex-wrap items-center gap-3 rounded-xl border p-4 " +
-            (isDark ? "border-slate-800 bg-slate-900/50" : "border-slate-200 bg-white")
-          }
-        >
-          <Filter className="h-4 w-4 text-slate-500" />
-          <div className="relative flex-1 min-w-[200px]">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            <input
-              type="text"
-              placeholder="Search provider, patient, key, insurance..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
+          {/* Filters */}
+          <div
+            className={
+              "mb-4 flex flex-wrap items-center gap-3 rounded-xl border p-4 " +
+              (isDark ? "border-slate-800 bg-slate-900/50" : "border-slate-200 bg-white")
+            }
+          >
+            <Filter className="h-4 w-4 text-slate-500" />
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+              <input
+                type="text"
+                placeholder="Search provider, patient, key, insurance..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className={
+                  "w-full rounded-lg border py-2 pl-9 pr-3 text-sm placeholder-slate-500 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500 " +
+                  (isDark
+                    ? "border-slate-700 bg-slate-800/80 text-white"
+                    : "border-slate-300 bg-white text-slate-900")
+                }
+              />
+            </div>
+            <select
+              value={filterReportRunDate}
+              onChange={(e) => setFilterReportRunDate(e.target.value)}
               className={
-                "w-full rounded-lg border py-2 pl-9 pr-3 text-sm placeholder-slate-500 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500 " +
+                "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
                 (isDark
                   ? "border-slate-700 bg-slate-800/80 text-white"
                   : "border-slate-300 bg-white text-slate-900")
               }
-            />
-          </div>
-          <select
-            value={filterInsurance}
-            onChange={(e) => setFilterInsurance(e.target.value)}
-            className={
-              "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
-              (isDark
-                ? "border-slate-700 bg-slate-800/80 text-white"
-                : "border-slate-300 bg-white text-slate-900")
-            }
-          >
-            <option value="">Insurance</option>
-            {INSURANCE_OPTIONS.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterWhereToBill}
-            onChange={(e) => setFilterWhereToBill(e.target.value)}
-            className={
-              "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
-              (isDark
-                ? "border-slate-700 bg-slate-800/80 text-white"
-                : "border-slate-300 bg-white text-slate-900")
-            }
-          >
-            <option value="">Where to bill</option>
-            {WHERE_TO_BILL_OPTIONS.map((o) => (
-              <option key={o} value={o}>
-                {o || "(blank)"}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterAutoWhereToBill}
-            onChange={(e) => setFilterAutoWhereToBill(e.target.value)}
-            className={
-              "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
-              (isDark
-                ? "border-slate-700 bg-slate-800/80 text-white"
-                : "border-slate-300 bg-white text-slate-900")
-            }
-          >
-            <option value="">Auto where to bill</option>
-            {WHERE_TO_BILL_OPTIONS.map((o) => (
-              <option key={o} value={o}>
-                {o || "(blank)"}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterBilled}
-            onChange={(e) => setFilterBilled(e.target.value)}
-            className={
-              "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
-              (isDark
-                ? "border-slate-700 bg-slate-800/80 text-white"
-                : "border-slate-300 bg-white text-slate-900")
-            }
-          >
-            <option value="">Billed?</option>
-            {BILLED_OPTIONS.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterApptType}
-            onChange={(e) => setFilterApptType(e.target.value)}
-            className={
-              "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
-              (isDark
-                ? "border-slate-700 bg-slate-800/80 text-white"
-                : "border-slate-300 bg-white text-slate-900")
-            }
-          >
-            <option value="">Appt type</option>
-            {apptTypeOptions.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterDnsReason}
-            onChange={(e) => setFilterDnsReason(e.target.value)}
-            className={
-              "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
-              (isDark
-                ? "border-slate-700 bg-slate-800/80 text-white"
-                : "border-slate-300 bg-white text-slate-900")
-            }
-          >
-            <option value="">DNS reason</option>
-            {DNS_OPTIONS.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-          <select
-            value={filterDuration}
-            onChange={(e) => setFilterDuration(e.target.value)}
-            className={
-              "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
-              (isDark
-                ? "border-slate-700 bg-slate-800/80 text-white"
-                : "border-slate-300 bg-white text-slate-900")
-            }
-          >
-            <option value="">Duration (min)</option>
-            {DURATION_OPTIONS.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
-          <label
-            className={
-              "flex cursor-pointer items-center gap-2 text-sm " +
-              (isDark ? "text-slate-400" : "text-slate-600")
-            }
-          >
-            <input
-              type="checkbox"
-              checked={showFinalOnly}
-              onChange={(e) => setShowFinalOnly(e.target.checked)}
-              className="rounded border-slate-600 bg-slate-800 text-teal-500 focus:ring-teal-500"
-            />
-            Final row only
-          </label>
-        </div>
-
-        {/* Table + exports + pagination */}
-        {loading ? (
-          <div className="flex items-center justify-center rounded-xl border border-slate-800 bg-slate-900/30 py-20">
-            <RefreshCw className="h-8 w-8 animate-spin text-teal-500" />
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="rounded-xl border border-slate-800 bg-slate-900/30 py-16 text-center text-slate-500">
-            No rows match. Try changing filters or refresh to load from the sheet.
-          </div>
-        ) : (
-          <>
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex gap-2">
-                <button
-                  onClick={exportCsv}
-                  className={
-                    "rounded-lg border px-3 py-1.5 text-xs sm:text-sm hover:bg-slate-700 " +
-                    (isDark
-                      ? "border-slate-700 bg-slate-800/80 text-slate-200"
-                      : "border-slate-300 bg-white text-slate-900")
-                  }
-                >
-                  Download CSV
-                </button>
-                <button
-                  onClick={exportPdf}
-                  className={
-                    "rounded-lg border px-3 py-1.5 text-xs sm:text-sm hover:bg-slate-700 " +
-                    (isDark
-                      ? "border-slate-700 bg-slate-800/80 text-slate-200"
-                      : "border-slate-300 bg-white text-slate-900")
-                  }
-                >
-                  Download PDF
-                </button>
-              </div>
-              <div className="flex items-center gap-2 text-xs text-slate-400">
-                <span>Rows per page</span>
-                <select
-                  value={pageSize}
-                  onChange={(e) => {
-                    setPage(1);
-                    setPageSize(Number(e.target.value) || 25);
-                  }}
-                  className={
-                    "rounded border px-2 py-1 text-xs " +
-                    (isDark
-                      ? "border-slate-700 bg-slate-900 text-slate-200"
-                      : "border-slate-300 bg-white text-slate-900")
-                  }
-                >
-                  {[10, 25, 50, 100].map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div
+            >
+              <option value="">Report date</option>
+              {reportRunDateOptions.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+            <select
+              value={filterInsurance}
+              onChange={(e) => setFilterInsurance(e.target.value)}
               className={
-                "overflow-hidden rounded-xl border " +
-                (isDark ? "border-slate-800 bg-slate-900/30" : "border-slate-200 bg-white")
+                "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
+                (isDark
+                  ? "border-slate-700 bg-slate-800/80 text-white"
+                  : "border-slate-300 bg-white text-slate-900")
               }
             >
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[1600px] text-left text-xs sm:text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-800 bg-slate-800/60">
-                      {ALL_COLUMNS.map((col) => (
-                        <Th key={col.key}>{col.label}</Th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pagedRows.map((r, i) => (
-                      <tr
-                        key={`${r.appointmentKey}-${r.runAttempt}-${startIndex + i}`}
-                        className={
-                          "table-row-hover border-b " +
-                          (isDark ? "border-slate-800/80" : "border-slate-200") +
-                          rowHighlightClass(r, theme)
-                        }
-                      >
-                        {ALL_COLUMNS.map((col) => {
+              <option value="">Insurance</option>
+              {INSURANCE_OPTIONS.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+            <select
+              value={filterWhereToBill}
+              onChange={(e) => setFilterWhereToBill(e.target.value)}
+              className={
+                "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
+                (isDark
+                  ? "border-slate-700 bg-slate-800/80 text-white"
+                  : "border-slate-300 bg-white text-slate-900")
+              }
+            >
+              <option value="">Where to bill</option>
+              {WHERE_TO_BILL_OPTIONS.map((o) => (
+                <option key={o} value={o}>
+                  {o || "(blank)"}
+                </option>
+              ))}
+            </select>
+            <select
+              value={filterAutoWhereToBill}
+              onChange={(e) => setFilterAutoWhereToBill(e.target.value)}
+              className={
+                "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
+                (isDark
+                  ? "border-slate-700 bg-slate-800/80 text-white"
+                  : "border-slate-300 bg-white text-slate-900")
+              }
+            >
+              <option value="">Auto where to bill</option>
+              {WHERE_TO_BILL_OPTIONS.map((o) => (
+                <option key={o} value={o}>
+                  {o || "(blank)"}
+                </option>
+              ))}
+            </select>
+            <select
+              value={filterBilled}
+              onChange={(e) => setFilterBilled(e.target.value)}
+              className={
+                "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
+                (isDark
+                  ? "border-slate-700 bg-slate-800/80 text-white"
+                  : "border-slate-300 bg-white text-slate-900")
+              }
+            >
+              <option value="">Billed?</option>
+              {BILLED_OPTIONS.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+            <select
+              value={filterApptType}
+              onChange={(e) => setFilterApptType(e.target.value)}
+              className={
+                "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
+                (isDark
+                  ? "border-slate-700 bg-slate-800/80 text-white"
+                  : "border-slate-300 bg-white text-slate-900")
+              }
+            >
+              <option value="">Appt type</option>
+              {apptTypeOptions.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+            <select
+              value={filterDnsReason}
+              onChange={(e) => setFilterDnsReason(e.target.value)}
+              className={
+                "rounded-lg border px-3 py-2 text-sm focus:border-teal-500 focus:outline-none " +
+                (isDark
+                  ? "border-slate-700 bg-slate-800/80 text-white"
+                  : "border-slate-300 bg-white text-slate-900")
+              }
+            >
+              <option value="">DNS reason</option>
+              {DNS_OPTIONS.map((o) => (
+                <option key={o} value={o}>
+                  {o}
+                </option>
+              ))}
+            </select>
+            <label
+              className={
+                "flex cursor-pointer items-center gap-2 text-sm " +
+                (isDark ? "text-slate-400" : "text-slate-600")
+              }
+            >
+              <input
+                type="checkbox"
+                checked={showFinalOnly}
+                onChange={(e) => setShowFinalOnly(e.target.checked)}
+                className="rounded border-slate-600 bg-slate-800 text-teal-500 focus:ring-teal-500"
+              />
+              Final row only
+            </label>
+          </div>
+
+          {/* Table + exports + pagination */}
+          {loading ? (
+            <div className="flex items-center justify-center rounded-xl border border-slate-800 bg-slate-900/30 py-20">
+              <RefreshCw className="h-8 w-8 animate-spin text-teal-500" />
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="rounded-xl border border-slate-800 bg-slate-900/30 py-16 text-center text-slate-500">
+              No rows match. Try changing filters or refresh to load from the sheet.
+            </div>
+          ) : (
+            <>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex gap-2">
+                  <button
+                    onClick={exportCsv}
+                    className={
+                      "rounded-lg border px-3 py-1.5 text-xs sm:text-sm hover:bg-slate-700 " +
+                      (isDark
+                        ? "border-slate-700 bg-slate-800/80 text-slate-200"
+                        : "border-slate-300 bg-white text-slate-900")
+                    }
+                  >
+                    Download CSV
+                  </button>
+                  <button
+                    onClick={exportPdf}
+                    className={
+                      "rounded-lg border px-3 py-1.5 text-xs sm:text-sm hover:bg-slate-700 " +
+                      (isDark
+                        ? "border-slate-700 bg-slate-800/80 text-slate-200"
+                        : "border-slate-300 bg-white text-slate-900")
+                    }
+                  >
+                    Download PDF
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-slate-400">
+                  <span>Rows per page</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPage(1);
+                      setPageSize(Number(e.target.value) || 25);
+                    }}
+                    className={
+                      "rounded border px-2 py-1 text-xs " +
+                      (isDark
+                        ? "border-slate-700 bg-slate-900 text-slate-200"
+                        : "border-slate-300 bg-white text-slate-900")
+                    }
+                  >
+                    {[10, 25, 50, 100].map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div
+                className={
+                  "overflow-hidden rounded-xl border " +
+                  (isDark ? "border-slate-800 bg-slate-900/30" : "border-slate-200 bg-white")
+                }
+              >
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[1600px] text-left text-xs sm:text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-800/60">
+                        {ALL_COLUMNS.map((col) => (
+                          <Th key={col.key}>{col.label}</Th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pagedRows.map((r, i) => (
+                        <tr
+                          key={`${r.appointmentKey}-${r.runAttempt}-${startIndex + i}`}
+                          className={
+                            "table-row-hover border-b " +
+                            (isDark ? "border-slate-800/80" : "border-slate-200") +
+                            rowHighlightClass(r, theme)
+                          }
+                        >
+                          {ALL_COLUMNS.map((col) => {
                           const value = r[col.key];
 
                           if (col.key === "noteLink" || col.key === "missingNotesUrl") {
@@ -1128,7 +1158,7 @@ export default function Home() {
               </span>
               <div className="flex items-center gap-2">
                 <button
-                  disabled={currentPage <= 1}
+                  disabled={!canGoPrev}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   className="rounded border border-slate-700 bg-slate-900 px-2 py-1 disabled:opacity-40"
                 >
@@ -1138,7 +1168,7 @@ export default function Home() {
                   Page {currentPage} / {totalPages}
                 </span>
                 <button
-                  disabled={currentPage >= totalPages}
+                  disabled={!canGoNext}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   className="rounded border border-slate-700 bg-slate-900 px-2 py-1 disabled:opacity-40"
                 >
@@ -1153,8 +1183,10 @@ export default function Home() {
           Data is read from your Google Sheet. Processing (OCR, extraction) runs only in Apps Script — never twice for the same file.
         </p>
       </main>
-    </div>
+    </RootLayout>
   );
+
+  return main;
 }
 
 function Card({
@@ -1189,3 +1221,4 @@ function Th({ children }: { children: React.ReactNode }) {
 function Td({ children }: { children: React.ReactNode }) {
   return <td className="px-4 py-3">{children}</td>;
 }
+
