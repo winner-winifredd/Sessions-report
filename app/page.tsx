@@ -1719,7 +1719,7 @@ export default function Home() {
                         }
                       >
                         <Td>Total (all providers)</Td>
-                        <Td colSpan={6}></Td>
+                        <td colSpan={6} />
                         <Td>{`$${totalEarningsR1.toFixed(2)}`}</Td>
                       </tr>
                     </tfoot>
