@@ -1769,7 +1769,19 @@ function Th({ children }: { children: React.ReactNode }) {
   return <th className="px-2 py-2 font-medium text-slate-400 whitespace-nowrap">{children}</th>;
 }
 
-function Td({ children }: { children: React.ReactNode }) {
-  return <td className="px-2 py-1.5 align-top">{children}</td>;
+type TdProps = React.PropsWithChildren<{
+  colSpan?: number;
+  className?: string;
+}>;
+
+function Td({ children, colSpan, className }: TdProps) {
+  return (
+    <td
+      colSpan={colSpan}
+      className={"px-2 py-1.5 align-top" + (className ? ` ${className}` : "")}
+    >
+      {children}
+    </td>
+  );
 }
 
