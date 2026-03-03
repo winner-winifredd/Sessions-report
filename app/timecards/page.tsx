@@ -237,7 +237,7 @@ function buildProviderTimeCardSummaries(rows: SessionReportRow[]): ProviderTimeC
     if (providerNoShow) summary.providerNoShowPenaltyCount += 1;
   }
 
-  for (const summary of byProvider.values()) {
+  Array.from(byProvider.values()).forEach((summary) => {
     const baseBillable =
       summary.intakeCount + summary.followupCount + summary.billableNoShowLateCancelCount;
     summary.totalBillableAppointments = Math.max(
@@ -255,7 +255,7 @@ function buildProviderTimeCardSummaries(rows: SessionReportRow[]): ProviderTimeC
         (rates.incentiveBonusPerPeriod || 0);
       summary.totalEarnings = earnings;
     }
-  }
+  });
 
   return Array.from(byProvider.values()).sort((a, b) =>
     a.providerName.localeCompare(b.providerName),
