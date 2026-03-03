@@ -278,6 +278,256 @@ function rowHighlightClass(row: SessionReportRow, theme: Theme): string {
   return "";
 }
 
+// ---- UI-owned business logic (migrated from Apps Script concepts) ----
+
+type UiCptAuditStatus = "ok" | "missingTiming" | "missingCpt" | "incorrectForTime";
+
+interface UiCptAuditResult {
+  status: UiCptAuditStatus;
+  message: string;
+}
+
+function parseMinutes(raw: string): number {
+  if (!raw) return 0;
+  const trimmed = raw.toString().trim();
+  const match = trimmed.match(/(\d+)(?:(?:\s*min)|$)/i);
+  if (!match) return 0;
+  return Number.parseInt(match[1], 10) || 0;
+}
+
+// Minimal CPT validation table, based on the transcript.
+// We only encode explicit rules we were given; all other codes
+// just require non-zero timing.
+const CPT_RULES: Record<string, { minTotalMinutes: number; minTherapyMinutes: number }> = {
+  // 99214 + 90833 follow-up combo: at least 30 total, 16 therapy.
+  "99214/90833": { minTotalMinutes: 30, minTherapyMinutes: 16 },
+};
+
+function computeUiCptAudit(row: SessionReportRow): UiCptAuditResult {
+  const cpt1 = (row.cptCode1 || "").trim();
+  const cpt2 = (row.cptCode2 || "").trim();
+  const hasCpt = !!(cpt1 || cpt2);
+
+  const totalMinutes = parseMinutes(row.duration || "");
+  const therapyMinutes = parseMinutes(row.therapyTime || "");
+
+  if (!hasCpt) {
+    return {
+      status: "missingCpt",
+      message: "Missing CPT code",
+    };
+  }
+
+  if (!totalMinutes || !therapyMinutes) {
+    return {
+      status: "missingTiming",
+      message: "Missing total and/or therapy time",
+    };
+  }
+
+  const key = `${cpt1}/${cpt2}`;
+  const rule = CPT_RULES[key];
+  if (rule) {
+    if (totalMinutes < rule.minTotalMinutes || therapyMinutes < rule.minTherapyMinutes) {
+      return {
+        status: "incorrectForTime",
+        message: `Time too low for ${key} (needs ≥${rule.minTotalMinutes} total, ≥${rule.minTherapyMinutes} therapy)`,
+      };
+    }
+  }
+
+  return {
+    status: "ok",
+    message: "Timing consistent with CPT",
+  };
+}
+
+function isLevelFiveCode(row: SessionReportRow): boolean {
+  const c1 = (row.cptCode1 || "").trim();
+  const c2 = (row.cptCode2 || "").trim();
+  return c1 === "99205" || c1 === "99215" || c2 === "99205" || c2 === "99215";
+}
+
+function computeAutoWhereToBill(insurance: string, apptType: string): string {
+  const ins = (insurance || "").toLowerCase().trim();
+  const appt = (apptType || "").toLowerCase().trim();
+  const isIntake = appt.includes("intake") || appt.includes("new");
+  const isFollowUp = appt.includes("follow") || appt.includes("existing");
+
+  if (!ins) return "";
+
+  // Anthem is always Headway.
+  if (ins.includes("anthem")) return "Headway";
+
+  // Aetna: intakes (and follow-ups) can be billed directly through Lytec.
+  if (ins.includes("aetna")) {
+    if (isIntake) return "Lytec (Intake Only)";
+    if (isFollowUp) return "Lytec (Follow-ups Only)";
+    return "Lytec (Follow-ups Only)";
+  }
+
+  // Optum / United: intakes must go through Headway, follow-ups can be direct.
+  if (ins.includes("optum") || ins.includes("united")) {
+    if (isIntake) return "Headway";
+    if (isFollowUp) return "Lytec (Follow-ups Only)";
+    return "Headway";
+  }
+
+  // Always-direct carriers through Lytec.
+  if (
+    ins.includes("multiplan") ||
+    ins.includes("tricare") ||
+    ins.includes("compsych") ||
+    ins.includes("comside") ||
+    ins.includes("comstack")
+  ) {
+    return "Lytec (Follow-ups Only)";
+  }
+
+  if (ins.includes("self pay") || ins === "self-pay") {
+    return "Self Pay";
+  }
+
+  // Fallback: unknown carrier – no automatic routing.
+  return "";
+}
+
+interface ProviderRateConfig {
+  providerName: string;
+  intakeRate: number;
+  followupRate: number;
+  noShowLateCancelRate: number;
+  providerNoShowPenalty: number;
+  incentiveBonusPerPeriod?: number;
+}
+
+// Placeholder — real values should be filled from actual provider rate sheets.
+const PROVIDER_RATE_SHEETS: ProviderRateConfig[] = [];
+
+interface ProviderTimeCardSummary {
+  providerName: string;
+  intakeCount: number;
+  followupCount: number;
+  billableNoShowLateCancelCount: number;
+  missingOrIncompleteCount: number;
+  totalBillableAppointments: number;
+  providerNoShowPenaltyCount: number;
+  totalEarnings?: number;
+}
+
+function getProviderRateConfig(providerName: string): ProviderRateConfig | undefined {
+  return PROVIDER_RATE_SHEETS.find(
+    (cfg) => cfg.providerName.toLowerCase().trim() === providerName.toLowerCase().trim()
+  );
+}
+
+function buildProviderTimeCardSummaries(rows: SessionReportRow[]): ProviderTimeCardSummary[] {
+  const byProvider = new Map<string, ProviderTimeCardSummary>();
+
+  for (const row of rows) {
+    const provider = (row.providerName || "").trim();
+    if (!provider) continue;
+
+    // Only count final rows so we don't double-count re-runs.
+    const isFinal = String(row.finalRowFlag || "").toLowerCase() === "true";
+    if (!isFinal) continue;
+
+    const apptRaw = (row.timecardApptType || row.apptType || "").toLowerCase().trim();
+    const apptTypeRaw = (row.apptType || "").toLowerCase().trim();
+    const isIntake = apptRaw.includes("intake") || apptRaw.includes("new");
+    const isFollowup = apptRaw.includes("existing") || apptRaw.includes("follow");
+    const isNoShow = apptTypeRaw === "no show";
+    const isLateCancel = apptTypeRaw === "late cancel";
+
+    const audit = computeUiCptAudit(row);
+    const timecardFmt = (row.timecardCptFormat || "").toLowerCase();
+    const hasMissingFmt =
+      timecardFmt.includes("missing") || timecardFmt.includes("incomplete");
+    const hasAuditIssue = !!(row.missingNotesAuditStatus || "").trim();
+    const unsignedNoShow =
+      (isNoShow || isLateCancel) && !(row.providerNoShowAttestation || "").trim();
+    const isMissingOrIncomplete =
+      hasMissingFmt || hasAuditIssue || unsignedNoShow || audit.status !== "ok";
+
+    const nsAction = (row.noShowLateCancellationAction || "").toLowerCase();
+    const isBillableNoShowLateCancel =
+      (isNoShow || isLateCancel) && nsAction.includes("charge");
+
+    const providerNoShow =
+      apptTypeRaw === "provider no show" || apptTypeRaw === "provider no-show";
+
+    let summary = byProvider.get(provider);
+    if (!summary) {
+      summary = {
+        providerName: provider,
+        intakeCount: 0,
+        followupCount: 0,
+        billableNoShowLateCancelCount: 0,
+        missingOrIncompleteCount: 0,
+        totalBillableAppointments: 0,
+        providerNoShowPenaltyCount: 0,
+        totalEarnings: undefined,
+      };
+      byProvider.set(provider, summary);
+    }
+
+    if (isIntake) summary.intakeCount += 1;
+    if (isFollowup) summary.followupCount += 1;
+    if (isBillableNoShowLateCancel) summary.billableNoShowLateCancelCount += 1;
+    if (isMissingOrIncomplete) summary.missingOrIncompleteCount += 1;
+    if (providerNoShow) summary.providerNoShowPenaltyCount += 1;
+  }
+
+  for (const summary of byProvider.values()) {
+    const baseBillable =
+      summary.intakeCount + summary.followupCount + summary.billableNoShowLateCancelCount;
+    summary.totalBillableAppointments = Math.max(
+      0,
+      baseBillable - summary.missingOrIncompleteCount,
+    );
+
+    const rates = getProviderRateConfig(summary.providerName);
+    if (rates) {
+      const earnings =
+        summary.intakeCount * rates.intakeRate +
+        summary.followupCount * rates.followupRate +
+        summary.billableNoShowLateCancelCount * rates.noShowLateCancelRate -
+        summary.providerNoShowPenaltyCount * rates.providerNoShowPenalty +
+        (rates.incentiveBonusPerPeriod || 0);
+      summary.totalEarnings = earnings;
+    }
+  }
+
+  return Array.from(byProvider.values()).sort((a, b) =>
+    a.providerName.localeCompare(b.providerName),
+  );
+}
+
+function rowHasUiBlockingIssue(row: SessionReportRow): boolean {
+  const audit = computeUiCptAudit(row);
+  const timecardFmt = (row.timecardCptFormat || "").toLowerCase();
+  const hasMissingFmt = timecardFmt.includes("missing") || timecardFmt.includes("incomplete");
+  const hasAuditIssue = !!(row.missingNotesAuditStatus || "").trim();
+  const apptTypeRaw = (row.apptType || "").toLowerCase().trim();
+  const isNoShow = apptTypeRaw === "no show";
+  const isLateCancel = apptTypeRaw === "late cancel";
+  const unsignedNoShow =
+    (isNoShow || isLateCancel) && !(row.providerNoShowAttestation || "").trim();
+
+  return hasMissingFmt || hasAuditIssue || unsignedNoShow || audit.status !== "ok";
+}
+
+function getPaymentPeriodKey(dateStr: string): string | null {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return null;
+  const year = d.getFullYear();
+  const month = d.getMonth() + 1;
+  const day = d.getDate();
+  const periodLabel = day <= 15 ? "1–15" : "16–EOM";
+  return `${year}-${String(month).padStart(2, "0")} (${periodLabel})`;
+}
+
 export default function Home() {
   const router = useRouter();
   const [rows, setRows] = useState<SessionReportRow[]>([]);
@@ -295,6 +545,7 @@ export default function Home() {
   const [showFinalOnly, setShowFinalOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const [payPeriodFilter, setPayPeriodFilter] = useState<string>("all");
   const [theme, setTheme] = useState<Theme>("dark");
   const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const graceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -404,6 +655,15 @@ export default function Home() {
     return Array.from(set).sort();
   }, [rows]);
 
+  const payPeriodOptions = useMemo(() => {
+    const set = new Set<string>();
+    rows.forEach((r) => {
+      const key = getPaymentPeriodKey(r.dateOfSession);
+      if (key) set.add(key);
+    });
+    return Array.from(set).sort();
+  }, [rows]);
+
   const filtered = useMemo(() => {
     let list = rows;
     if (search.trim()) {
@@ -426,7 +686,18 @@ export default function Home() {
     if (filterApptType) list = list.filter((r) => r.apptType === filterApptType);
     if (showFinalOnly) list = list.filter((r) => String(r.finalRowFlag).toLowerCase() === "true");
     return list;
-  }, [rows, search, filterWhereToBill, filterBilled, filterApptType, showFinalOnly]);
+  }, [
+    rows,
+    search,
+    filterReportRunDate,
+    filterInsurance,
+    filterWhereToBill,
+    filterAutoWhereToBill,
+    filterBilled,
+    filterDnsReason,
+    filterApptType,
+    showFinalOnly,
+  ]);
 
   const needsReview = useMemo(
     () => filtered.filter((r) => r.missingNotesAuditStatus && r.missingNotesAuditStatus.length > 0),
@@ -439,6 +710,41 @@ export default function Home() {
   const pagedRows = filtered.slice(startIndex, startIndex + pageSize);
 
   const isDark = theme === "dark";
+
+  const rowsForTimeCards = useMemo(
+    () =>
+      payPeriodFilter === "all"
+        ? rows
+        : rows.filter(
+            (r) => getPaymentPeriodKey(r.dateOfSession) === payPeriodFilter,
+          ),
+    [rows, payPeriodFilter],
+  );
+
+  const providerSummaries = useMemo(
+    () => buildProviderTimeCardSummaries(rowsForTimeCards),
+    [rowsForTimeCards],
+  );
+
+  const totalEarningsR1 = useMemo(
+    () =>
+      providerSummaries.reduce(
+        (sum, p) => sum + (typeof p.totalEarnings === "number" ? p.totalEarnings : 0),
+        0,
+      ),
+    [providerSummaries],
+  );
+
+  const multiRunCount = useMemo(
+    () =>
+      rows.filter(
+        (r) =>
+          String(r.finalRowFlag || "").toLowerCase() === "true" &&
+          (r.runAttempt || "").trim() &&
+          (r.runAttempt || "").trim() !== "1",
+      ).length,
+    [rows],
+  );
 
   const exportCsv = () => {
     if (!filtered.length) return;
@@ -465,6 +771,20 @@ export default function Home() {
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
+
+  const recomputeAutoWhereToBill = (mode: "blank" | "all") => {
+    setRows((prev) =>
+      prev.map((row) => {
+        const apptType = row.timecardApptType || row.apptType || "";
+        const computed = computeAutoWhereToBill(row.insurance || "", apptType);
+        if (!computed) return row;
+        if (mode === "blank" && (row.autoWhereToBill || "").trim()) {
+          return row;
+        }
+        return { ...row, autoWhereToBill: computed };
+      }),
+    );
   };
 
   const handleLogout = async () => {
@@ -548,6 +868,18 @@ export default function Home() {
                 </>
               )}
             </button>
+            <button
+              onClick={() => router.push("/timecards")}
+              className={
+                "hidden items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition sm:flex " +
+                (isDark
+                  ? "border border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100")
+              }
+            >
+              <User className="h-4 w-4" />
+              <span>Provider time cards</span>
+            </button>
             <span
               className={
                 "hidden text-xs sm:inline " +
@@ -610,9 +942,9 @@ export default function Home() {
             />
             <Card
               icon={<Building2 className="h-5 w-5 text-sky-400" />}
-              label="Data source"
-              value="Google Sheet"
-              sub="Read-only with Edit access."
+              label="Re-run files"
+              value={String(multiRunCount)}
+              sub="Final rows with runAttempt > 1"
             />
           </div>
 
@@ -786,7 +1118,7 @@ export default function Home() {
           ) : (
             <>
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={exportCsv}
                     className={
@@ -808,6 +1140,28 @@ export default function Home() {
                     }
                   >
                     Download PDF
+                  </button>
+                  <button
+                    onClick={() => recomputeAutoWhereToBill("blank")}
+                    className={
+                      "rounded-lg border px-3 py-1.5 text-xs sm:text-sm " +
+                      (isDark
+                        ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+                        : "border-slate-300 bg-white text-slate-900 hover:bg-slate-100")
+                    }
+                  >
+                    Auto Where to Bill (blank only)
+                  </button>
+                  <button
+                    onClick={() => recomputeAutoWhereToBill("all")}
+                    className={
+                      "rounded-lg border px-3 py-1.5 text-xs sm:text-sm " +
+                      (isDark
+                        ? "border-slate-700 bg-slate-900 text-slate-200 hover:bg-slate-800"
+                        : "border-slate-300 bg-white text-slate-900 hover:bg-slate-100")
+                    }
+                  >
+                    Auto Where to Bill (overwrite all)
                   </button>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -840,8 +1194,8 @@ export default function Home() {
                   (isDark ? "border-slate-800 bg-slate-900/30" : "border-slate-200 bg-white")
                 }
               >
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1600px] text-left text-xs sm:text-sm">
+              <div className="overflow-x-auto">
+                  <table className="w-full min-w-[1200px] text-left text-[11px] sm:text-xs">
                     <thead>
                       <tr className="border-b border-slate-800 bg-slate-800/60">
                         {ALL_COLUMNS.map((col) => (
@@ -876,6 +1230,33 @@ export default function Home() {
                                     <ExternalLink className="h-3.5 w-3" />
                                     Link
                                   </a>
+                                ) : (
+                                  "—"
+                                )}
+                              </Td>
+                            );
+                          }
+
+                          if (col.key === "runAttempt") {
+                            const text = value?.toString().trim() || "";
+                            const isAnomaly = text && text !== "1";
+                            return (
+                              <Td key={col.key}>
+                                {text ? (
+                                  <span
+                                    className={
+                                      "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium " +
+                                      (isAnomaly
+                                        ? isDark
+                                          ? "bg-red-950/70 text-red-200"
+                                          : "bg-red-50 text-red-800"
+                                        : isDark
+                                        ? "bg-slate-800/70 text-slate-100"
+                                        : "bg-slate-100 text-slate-800")
+                                    }
+                                  >
+                                    {text}
+                                  </span>
                                 ) : (
                                   "—"
                                 )}
@@ -996,6 +1377,24 @@ export default function Home() {
 
                           if (col.key === "billed") {
                             const current = r.billed || "";
+                            const blocked = rowHasUiBlockingIssue(r);
+                            if (blocked) {
+                              return (
+                                <Td key={col.key}>
+                                  <span
+                                    className={
+                                      "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium " +
+                                      (isDark
+                                        ? "bg-red-950/70 text-red-200"
+                                        : "bg-red-50 text-red-800")
+                                    }
+                                    title="Billing blocked: fix CPT/timing, audit issues, or no-show attestation."
+                                  >
+                                    Blocked — fix note/attestation/CPT
+                                  </span>
+                                </Td>
+                              );
+                            }
                             return (
                               <Td key={col.key}>
                                 <select
@@ -1058,6 +1457,42 @@ export default function Home() {
                             );
                           }
 
+                          if (col.key === "cptCode1" || col.key === "cptCode2") {
+                            const code = value?.toString().trim() || "";
+                            const isL5 = code === "99205" || code === "99215";
+                            if (!code) {
+                              return <Td key={col.key}>—</Td>;
+                            }
+                            return (
+                              <Td key={col.key}>
+                                <span
+                                  className={
+                                    "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium " +
+                                    (isL5
+                                      ? isDark
+                                        ? "bg-red-950/70 text-red-200"
+                                        : "bg-red-50 text-red-800"
+                                      : isDark
+                                      ? "bg-slate-800/70 text-slate-100"
+                                      : "bg-slate-100 text-slate-800")
+                                  }
+                                >
+                                  {code}
+                                </span>
+                                {isL5 && (
+                                  <span
+                                    className={
+                                      "mt-1 block text-[10px] " +
+                                      (isDark ? "text-red-300" : "text-red-700")
+                                    }
+                                  >
+                                    Level 5 — justification required
+                                  </span>
+                                )}
+                              </Td>
+                            );
+                          }
+
                           if (col.key === "timecardCptFormat") {
                             const text = value?.toString().trim();
                             const isMissing =
@@ -1090,22 +1525,40 @@ export default function Home() {
                           if (col.key === "missingNotesAuditStatus") {
                             const text = value?.toString().trim();
                             const hasIssue = !!text;
+                            const audit = computeUiCptAudit(r);
+                            const uiHasIssue = audit.status !== "ok";
                             return (
                               <Td key={col.key}>
-                                {hasIssue ? (
+                                <div className="flex flex-col gap-0.5">
+                                  {hasIssue ? (
+                                    <span
+                                      className={
+                                        "inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-medium " +
+                                        (isDark
+                                          ? "bg-amber-900/70 text-amber-100"
+                                          : "bg-amber-50 text-amber-800")
+                                      }
+                                    >
+                                      {text}
+                                    </span>
+                                  ) : (
+                                    <span className="text-emerald-400 text-[10px]">OK (sheet)</span>
+                                  )}
                                   <span
                                     className={
                                       "inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-medium " +
-                                      (isDark
-                                        ? "bg-amber-900/70 text-amber-100"
-                                        : "bg-amber-50 text-amber-800")
+                                      (uiHasIssue
+                                        ? isDark
+                                          ? "bg-red-950/70 text-red-200"
+                                          : "bg-red-50 text-red-800"
+                                        : isDark
+                                        ? "bg-emerald-950/60 text-emerald-200"
+                                        : "bg-emerald-50 text-emerald-700")
                                     }
                                   >
-                                    {text}
+                                    {uiHasIssue ? audit.message : "OK (UI CPT check)"}
                                   </span>
-                                ) : (
-                                  <span className="text-emerald-400 text-[10px]">OK</span>
-                                )}
+                                </div>
                               </Td>
                             );
                           }
@@ -1179,6 +1632,104 @@ export default function Home() {
           </>
         )}
 
+        {providerSummaries.length > 0 && (
+          <section className="mt-8">
+            <h2 className="mb-3 text-sm font-semibold text-slate-200">
+              Provider time cards (UI-derived)
+            </h2>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className={isDark ? "text-slate-400" : "text-slate-600"}>
+                Aggregated from final rows
+                {payPeriodFilter !== "all" ? ` · Period: ${payPeriodFilter}` : ""}
+              </span>
+              <div className="flex items-center gap-2">
+                <span className={isDark ? "text-slate-400" : "text-slate-600"}>
+                  Pay period
+                </span>
+                <select
+                  value={payPeriodFilter}
+                  onChange={(e) => setPayPeriodFilter(e.target.value)}
+                  className={
+                    "rounded border px-2 py-1 text-xs " +
+                    (isDark
+                      ? "border-slate-700 bg-slate-900 text-slate-200"
+                      : "border-slate-300 bg-white text-slate-900")
+                  }
+                >
+                  <option value="all">All</option>
+                  {payPeriodOptions.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div
+              className={
+                "overflow-hidden rounded-xl border " +
+                (isDark ? "border-slate-800 bg-slate-900/30" : "border-slate-200 bg-white")
+              }
+            >
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[800px] text-left text-[11px] sm:text-xs">
+                  <thead>
+                    <tr className={isDark ? "border-b border-slate-800 bg-slate-800/60" : "border-b border-slate-200 bg-slate-100"}>
+                      <Th>Provider</Th>
+                      <Th>Intakes</Th>
+                      <Th>Follow-ups</Th>
+                      <Th>Billable NS / LC</Th>
+                      <Th>Missing / incomplete</Th>
+                      <Th>Total billable appts</Th>
+                      <Th>Provider no-show count</Th>
+                      <Th>Total pay (Cell R1)</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {providerSummaries.map((p) => (
+                      <tr
+                        key={p.providerName}
+                        className={
+                          "border-b " +
+                          (isDark ? "border-slate-800/80" : "border-slate-200")
+                        }
+                      >
+                        <Td>{p.providerName}</Td>
+                        <Td>{p.intakeCount}</Td>
+                        <Td>{p.followupCount}</Td>
+                        <Td>{p.billableNoShowLateCancelCount}</Td>
+                        <Td>{p.missingOrIncompleteCount}</Td>
+                        <Td>{p.totalBillableAppointments}</Td>
+                        <Td>{p.providerNoShowPenaltyCount}</Td>
+                        <Td>
+                          {typeof p.totalEarnings === "number"
+                            ? `$${p.totalEarnings.toFixed(2)}`
+                            : "— (no rate sheet)"}
+                        </Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  {typeof totalEarningsR1 === "number" && totalEarningsR1 > 0 && (
+                    <tfoot>
+                      <tr
+                        className={
+                          isDark
+                            ? "border-t border-slate-700 bg-slate-900/70"
+                            : "border-t border-slate-200 bg-slate-50"
+                        }
+                      >
+                        <Td>Total (all providers)</Td>
+                        <Td colSpan={6}></Td>
+                        <Td>{`$${totalEarningsR1.toFixed(2)}`}</Td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            </div>
+          </section>
+        )}
+
         <p className="mt-6 text-center text-xs text-slate-600">
           Data is read from your Google Sheet. Processing (OCR, extraction) runs only in Apps Script — never twice for the same file.
         </p>
@@ -1215,10 +1766,10 @@ function Card({
 }
 
 function Th({ children }: { children: React.ReactNode }) {
-  return <th className="px-4 py-3 font-medium text-slate-400">{children}</th>;
+  return <th className="px-2 py-2 font-medium text-slate-400 whitespace-nowrap">{children}</th>;
 }
 
 function Td({ children }: { children: React.ReactNode }) {
-  return <td className="px-4 py-3">{children}</td>;
+  return <td className="px-2 py-1.5 align-top">{children}</td>;
 }
 
