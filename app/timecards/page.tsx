@@ -14,9 +14,6 @@ interface ProviderRateConfig {
   incentiveBonusPerPeriod?: number;
 }
 
-// TODO: populate from your real rate sheets.
-const PROVIDER_RATE_SHEETS: ProviderRateConfig[] = [];
-
 interface ProviderTimeCardSummary {
   providerName: string;
   intakeCount: number;
@@ -28,8 +25,11 @@ interface ProviderTimeCardSummary {
   totalEarnings?: number;
 }
 
-function getProviderRateConfig(providerName: string): ProviderRateConfig | undefined {
-  return PROVIDER_RATE_SHEETS.find(
+function getProviderRateConfig(
+  providerName: string,
+  rates: ProviderRateConfig[],
+): ProviderRateConfig | undefined {
+  return rates.find(
     (cfg) => cfg.providerName.toLowerCase().trim() === providerName.toLowerCase().trim(),
   );
 }
@@ -189,7 +189,10 @@ function getPaymentPeriodKey(dateStr: string): string | null {
   return `${year}-${String(month).padStart(2, "0")} (${periodLabel})`;
 }
 
-function buildProviderTimeCardSummaries(rows: SessionReportRow[]): ProviderTimeCardSummary[] {
+function buildProviderTimeCardSummaries(
+  rows: SessionReportRow[],
+  rates: ProviderRateConfig[],
+): ProviderTimeCardSummary[] {
   const byProvider = new Map<string, ProviderTimeCardSummary>();
 
   for (const row of rows) {
@@ -245,14 +248,14 @@ function buildProviderTimeCardSummaries(rows: SessionReportRow[]): ProviderTimeC
       baseBillable - summary.missingOrIncompleteCount,
     );
 
-    const rates = getProviderRateConfig(summary.providerName);
-    if (rates) {
+    const rateConfig = getProviderRateConfig(summary.providerName, rates);
+    if (rateConfig) {
       const earnings =
-        summary.intakeCount * rates.intakeRate +
-        summary.followupCount * rates.followupRate +
-        summary.billableNoShowLateCancelCount * rates.noShowLateCancelRate -
-        summary.providerNoShowPenaltyCount * rates.providerNoShowPenalty +
-        (rates.incentiveBonusPerPeriod || 0);
+        summary.intakeCount * rateConfig.intakeRate +
+        summary.followupCount * rateConfig.followupRate +
+        summary.billableNoShowLateCancelCount * rateConfig.noShowLateCancelRate -
+        summary.providerNoShowPenaltyCount * rateConfig.providerNoShowPenalty +
+        (rateConfig.incentiveBonusPerPeriod || 0);
       summary.totalEarnings = earnings;
     }
   });
@@ -278,6 +281,7 @@ export default function ProviderTimeCardsPage() {
   const [payPeriodFilter, setPayPeriodFilter] = useState<string>("all");
   const [providerSearch, setProviderSearch] = useState<string>("");
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
+  const [providerRates, setProviderRates] = useState<ProviderRateConfig[]>([]);
 
   useEffect(() => {
     const load = async () => {
@@ -297,9 +301,18 @@ export default function ProviderTimeCardsPage() {
         if (!res.ok) throw new Error(data.error || "Failed to load");
         setRows(data.rows || []);
         setLastUpdated(data.lastUpdated || null);
+
+        const ratesRes = await fetch("/api/sheets/rates", { cache: "no-store" });
+        if (ratesRes.ok) {
+          const ratesData = await ratesRes.json();
+          setProviderRates(ratesData.rates || []);
+        } else {
+          setProviderRates([]);
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         setRows([]);
+        setProviderRates([]);
       } finally {
         setLoading(false);
       }
@@ -327,8 +340,8 @@ export default function ProviderTimeCardsPage() {
   );
 
   const providerSummaries = useMemo(
-    () => buildProviderTimeCardSummaries(rowsForTimeCards),
-    [rowsForTimeCards],
+    () => buildProviderTimeCardSummaries(rowsForTimeCards, providerRates),
+    [rowsForTimeCards, providerRates],
   );
 
   const filteredProviders = useMemo(
@@ -527,20 +540,20 @@ export default function ProviderTimeCardsPage() {
                     Clear selection
                   </button>
                 </div>
-                <div className="overflow-hidden rounded-xl border border-slate-800 bg-slate-950/40">
-                  <div className="overflow-x-auto">
-                    <table className="w-full min-w-[900px] text-left text-[11px]">
+                <div className="rounded-xl border border-slate-800 bg-slate-950/40">
+                  <div className="overflow-x-auto overflow-y-visible">
+                    <table className="w-full min-w-[1100px] text-left text-[11px]">
                       <thead className="border-b border-slate-800 bg-slate-900/80">
                         <tr>
-                          <th className="px-3 py-2 text-slate-300">Date</th>
-                          <th className="px-3 py-2 text-slate-300">Appointment key</th>
-                          <th className="px-3 py-2 text-slate-300">Patient</th>
-                          <th className="px-3 py-2 text-slate-300">Appt type</th>
-                          <th className="px-3 py-2 text-slate-300">CPT</th>
-                          <th className="px-3 py-2 text-slate-300">Time (min)</th>
-                          <th className="px-3 py-2 text-slate-300">Audit / status</th>
-                          <th className="px-3 py-2 text-slate-300">Billed?</th>
-                          <th className="px-3 py-2 text-slate-300 text-right">
+                          <th className="min-w-[90px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">Date</th>
+                          <th className="min-w-[160px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">Appointment key</th>
+                          <th className="min-w-[100px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">Patient</th>
+                          <th className="min-w-[90px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">Appt type</th>
+                          <th className="min-w-[80px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">CPT</th>
+                          <th className="min-w-[100px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">Time (min)</th>
+                          <th className="min-w-[140px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">Audit / status</th>
+                          <th className="min-w-[80px] shrink-0 px-3 py-1 text-slate-300 whitespace-nowrap">Billed?</th>
+                          <th className="min-w-[100px] shrink-0 px-3 py-1 text-right text-slate-300 whitespace-nowrap">
                             Per-appointment pay
                           </th>
                         </tr>
@@ -556,7 +569,7 @@ export default function ProviderTimeCardsPage() {
                           const blocked = rowHasUiBlockingIssue(r);
                           const explicitDuration = parseMinutes(r.duration || "");
                           const derivedDuration = deriveDurationFromStartEnd(r);
-                          const rates = getProviderRateConfig(r.providerName || "");
+                          const rates = getProviderRateConfig(r.providerName || "", providerRates);
                           const rowPay = computeRowPay(r, rates);
 
                           return (
@@ -564,33 +577,25 @@ export default function ProviderTimeCardsPage() {
                               key={`${r.appointmentKey}-${r.runAttempt}`}
                               className="border-b border-slate-800/80"
                             >
-                              <td className="px-3 py-2 align-top text-slate-200">
+                              <td className="min-w-[90px] shrink-0 overflow-visible px-3 py-1 align-middle text-slate-200 whitespace-nowrap">
                                 {r.dateOfSession || "—"}
                               </td>
-                              <td className="px-3 py-2 align-top text-slate-200">
-                                <div className="text-[11px] text-slate-100">
-                                  {r.appointmentKey || "—"}
-                                </div>
-                                <div className="text-[10px] text-slate-500">
-                                  Recomputed: {computedKey || "—"}
-                                </div>
+                              <td className="min-w-[160px] shrink-0 overflow-visible px-3 py-1 align-middle text-slate-200 whitespace-nowrap">
+                                <div className="text-[11px] text-slate-100">{r.appointmentKey || "—"}</div>
+                                <div className="text-[10px] text-slate-500">Recomputed: {computedKey || "—"}</div>
                               </td>
-                              <td className="px-3 py-2 align-top text-slate-200">
+                              <td className="min-w-[100px] shrink-0 overflow-visible px-3 py-1 align-middle text-slate-200 whitespace-nowrap">
                                 <div>{r.patientInitials || r.patientName || "—"}</div>
-                                <div className="text-[10px] text-slate-500">
-                                  {r.patientState || ""}
-                                </div>
+                                <div className="text-[10px] text-slate-500">{r.patientState || ""}</div>
                               </td>
-                              <td className="px-3 py-2 align-top text-slate-200">
+                              <td className="min-w-[90px] shrink-0 overflow-visible px-3 py-1 align-middle text-slate-200 whitespace-nowrap">
                                 {r.apptType || "—"}
                               </td>
-                              <td className="px-3 py-2 align-top text-slate-200">
+                              <td className="min-w-[80px] shrink-0 overflow-visible px-3 py-1 align-middle text-slate-200 whitespace-nowrap">
                                 <div>{r.cptCode1 || "—"}</div>
-                                <div className="text-[10px] text-slate-400">
-                                  {r.cptCode2 || ""}
-                                </div>
+                                <div className="text-[10px] text-slate-400">{r.cptCode2 || ""}</div>
                               </td>
-                              <td className="px-3 py-2 align-top text-slate-200">
+                              <td className="min-w-[100px] shrink-0 overflow-visible px-3 py-1 align-middle text-slate-200 whitespace-nowrap">
                                 <div className="text-[11px]">
                                   Duration:{" "}
                                   {explicitDuration ? `${explicitDuration} min` : "—"}
@@ -609,7 +614,7 @@ export default function ProviderTimeCardsPage() {
                                   </div>
                                 )}
                               </td>
-                              <td className="px-3 py-2 align-top">
+                              <td className="min-w-[140px] shrink-0 overflow-visible px-3 py-1 align-middle whitespace-nowrap">
                                 <div
                                   className={
                                     "inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium " +
@@ -628,7 +633,7 @@ export default function ProviderTimeCardsPage() {
                                   </div>
                                 )}
                               </td>
-                              <td className="px-3 py-2 align-top text-slate-200">
+                              <td className="min-w-[80px] shrink-0 overflow-visible px-3 py-1 align-middle text-slate-200 whitespace-nowrap">
                                 {blocked ? (
                                   <span className="text-[10px] text-red-300">
                                     Blocked — fix note/attestation/CPT
@@ -637,7 +642,7 @@ export default function ProviderTimeCardsPage() {
                                   r.billed || "—"
                                 )}
                               </td>
-                              <td className="px-3 py-2 align-top text-right text-slate-200">
+                              <td className="min-w-[100px] shrink-0 overflow-visible px-3 py-1 align-middle text-right text-slate-200 whitespace-nowrap">
                                 {rates
                                   ? `$${rowPay.toFixed(2)}`
                                   : "— (no rate sheet)"}

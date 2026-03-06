@@ -34,6 +34,7 @@ interface SessionCookiePayload {
   sheetId: string;
   tabName: string;
   displayName?: string | null;
+  rateSheetTab?: string | null;
   issuedAt: number;
 }
 

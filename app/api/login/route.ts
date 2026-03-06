@@ -14,6 +14,10 @@ interface ConfigRow {
   sheetId: string;
   tabName: string;
   displayName?: string;
+  driveFolderId?: string;
+  cptTabName?: string;
+  lytecTabName?: string;
+  rateSheetTab?: string;
 }
 
 function getAuth() {
@@ -57,20 +61,34 @@ async function loadConfigRows(): Promise<ConfigRow[]> {
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: configSheetId,
-    range: `'${configTab}'!A2:E`,
+    range: `'${configTab}'!A2:J`,
   });
 
   const values = (res.data.values || []) as string[][];
 
   return values
     .map((row) => {
-      const [userEmail = "", password = "", sheetId = "", tabName = "", displayName = ""] = row;
+      const [
+        userEmail = "",
+        password = "",
+        sheetId = "",
+        tabName = "",
+        displayName = "",
+        driveFolderId = "",
+        cptTabName = "",
+        lytecTabName = "",
+        rateSheetTab = "",
+      ] = row;
       return {
         userEmail: String(userEmail || "").trim(),
         password: String(password || "").trim(),
         sheetId: String(sheetId || "").trim(),
         tabName: String(tabName || "").trim(),
         displayName: String(displayName || "").trim() || undefined,
+        driveFolderId: String(driveFolderId || "").trim() || undefined,
+        cptTabName: String(cptTabName || "").trim() || undefined,
+        lytecTabName: String(lytecTabName || "").trim() || undefined,
+        rateSheetTab: String(rateSheetTab || "").trim() || undefined,
       } as ConfigRow;
     })
     .filter((r) => r.userEmail && r.sheetId && r.tabName);
@@ -106,6 +124,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       sheetId: match.sheetId,
       tabName: match.tabName,
       displayName: match.displayName || null,
+      rateSheetTab: match.rateSheetTab || null,
       issuedAt: Date.now(),
     });
 

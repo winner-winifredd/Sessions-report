@@ -6,6 +6,9 @@ export function middleware(req: NextRequest) {
 
   // Allow unauthenticated access to login + auth endpoints and static assets
   if (
+    pathname === "/" ||
+    pathname === "/landing" ||
+    pathname === "/landing/" ||
     pathname === "/login" ||
     pathname === "/login/" ||
     pathname.startsWith("/api/login") ||
