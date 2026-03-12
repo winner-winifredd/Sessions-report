@@ -125,6 +125,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       tabName: match.tabName,
       displayName: match.displayName || null,
       rateSheetTab: match.rateSheetTab || null,
+      driveFolderId: match.driveFolderId || null,
       issuedAt: Date.now(),
     });
 

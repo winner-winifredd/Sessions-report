@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 import type { SessionReportRow } from "../types";
 
+const PROVIDER_RATES_CACHE_KEY = "providerRates";
+
 const ALL_COLUMNS: { key: keyof SessionReportRow; label: string }[] = [
   { key: "reportRunDate", label: "Report Run Date" },
   { key: "runAttempt", label: "Run Attempt" },
@@ -526,6 +528,7 @@ export default function DashboardPage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ratesRefreshing, setRatesRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [filterWhereToBill, setFilterWhereToBill] = useState<string>("");
   const [filterBilled, setFilterBilled] = useState<string>("");
@@ -544,6 +547,18 @@ export default function DashboardPage() {
   const [providerRates, setProviderRates] = useState<ProviderRateConfig[]>([]);
   const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const graceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const readCachedProviderRates = (): ProviderRateConfig[] | null => {
+    try {
+      const raw = sessionStorage.getItem(PROVIDER_RATES_CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { rates?: unknown; cachedAt?: unknown };
+      if (!Array.isArray(parsed?.rates) || typeof parsed?.cachedAt !== "number") return null;
+      return parsed.rates as ProviderRateConfig[];
+    } catch {
+      return null;
+    }
+  };
 
   async function saveMissingNotesUrl(rowIndex: number, value: string) {
     setUrlSaveError(null);
@@ -564,6 +579,39 @@ export default function DashboardPage() {
       setSavingUrlRowIndex(null);
     }
   }
+
+  const refreshProviderRates = async (opts?: { force?: boolean }) => {
+    const force = !!opts?.force;
+    setRatesRefreshing(true);
+    setError(null);
+    try {
+      const url = force ? "/api/sheets/rates?refresh=1" : "/api/sheets/rates";
+      const ratesRes = await fetch(url, { cache: "no-store" });
+      if (ratesRes.status === 401) {
+        router.push("/login");
+        return;
+      }
+      const ratesData = await ratesRes.json();
+      if (!ratesRes.ok) {
+        throw new Error(ratesData?.error || "Failed to refresh provider rates");
+      }
+
+      const nextRates = (ratesData?.rates || []) as ProviderRateConfig[];
+      setProviderRates(nextRates);
+      try {
+        sessionStorage.setItem(
+          PROVIDER_RATES_CACHE_KEY,
+          JSON.stringify({ rates: nextRates, cachedAt: Date.now() }),
+        );
+      } catch {
+        // ignore storage errors
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRatesRefreshing(false);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -590,12 +638,11 @@ export default function DashboardPage() {
       setRows(data.rows || []);
       setLastUpdated(data.lastUpdated || null);
 
-      const ratesRes = await fetch("/api/sheets/rates", { cache: "no-store" });
-      if (ratesRes.ok) {
-        const ratesData = await ratesRes.json();
-        setProviderRates(ratesData.rates || []);
+      const cachedRates = readCachedProviderRates();
+      if (cachedRates) {
+        setProviderRates(cachedRates);
       } else {
-        setProviderRates([]);
+        await refreshProviderRates();
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -894,6 +941,22 @@ export default function DashboardPage() {
             >
               <User className="h-4 w-4" />
               <span className="hidden sm:inline">Provider time cards</span>
+            </button>
+            <button
+              onClick={() => refreshProviderRates({ force: true })}
+              disabled={ratesRefreshing || loading}
+              title="Force refresh provider rates from Google Drive/Sheets"
+              className={
+                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition disabled:opacity-50 " +
+                (isDark
+                  ? "border border-slate-700 bg-slate-900 text-teal-300 hover:bg-slate-800"
+                  : "border border-slate-200 bg-white text-teal-700 hover:bg-slate-100")
+              }
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${ratesRefreshing ? "animate-spin" : ""}`}
+              />
+              <span className="hidden sm:inline">Refresh rates</span>
             </button>
             <button
               onClick={fetchData}

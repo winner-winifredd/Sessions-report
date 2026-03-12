@@ -35,6 +35,7 @@ interface SessionCookiePayload {
   tabName: string;
   displayName?: string | null;
   rateSheetTab?: string | null;
+  driveFolderId?: string | null;
   issuedAt: number;
 }
 

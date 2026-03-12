@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, CalendarRange, DollarSign, FileSpreadsheet, User } from "lucide-react";
+import { ArrowLeft, CalendarRange, DollarSign, FileSpreadsheet, RefreshCw, User } from "lucide-react";
 import type { SessionReportRow } from "@/app/types";
 
 interface ProviderRateConfig {
@@ -278,10 +278,44 @@ export default function ProviderTimeCardsPage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ratesRefreshing, setRatesRefreshing] = useState(false);
   const [payPeriodFilter, setPayPeriodFilter] = useState<string>("all");
   const [providerSearch, setProviderSearch] = useState<string>("");
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
   const [providerRates, setProviderRates] = useState<ProviderRateConfig[]>([]);
+
+  const refreshProviderRates = async (opts?: { force?: boolean }) => {
+    const force = !!opts?.force;
+    setRatesRefreshing(true);
+    setError(null);
+    try {
+      const url = force ? "/api/sheets/rates?refresh=1" : "/api/sheets/rates";
+      const ratesRes = await fetch(url, { cache: "no-store" });
+      if (ratesRes.status === 401) {
+        router.push("/login");
+        return;
+      }
+      const ratesData = await ratesRes.json();
+      if (!ratesRes.ok) {
+        throw new Error(ratesData?.error || "Failed to refresh provider rates");
+      }
+
+      const nextRates = (ratesData?.rates || []) as ProviderRateConfig[];
+      setProviderRates(nextRates);
+      try {
+        sessionStorage.setItem(
+          "providerRates",
+          JSON.stringify({ rates: nextRates, cachedAt: Date.now() }),
+        );
+      } catch {
+        // ignore storage errors
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRatesRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -302,13 +336,7 @@ export default function ProviderTimeCardsPage() {
         setRows(data.rows || []);
         setLastUpdated(data.lastUpdated || null);
 
-        const ratesRes = await fetch("/api/sheets/rates", { cache: "no-store" });
-        if (ratesRes.ok) {
-          const ratesData = await ratesRes.json();
-          setProviderRates(ratesData.rates || []);
-        } else {
-          setProviderRates([]);
-        }
+        await refreshProviderRates();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         setRows([]);
@@ -398,11 +426,23 @@ export default function ProviderTimeCardsPage() {
               </div>
             </div>
           </div>
-          {lastUpdated && (
-            <div className="hidden text-xs text-slate-400 sm:block">
-              Last sheet sync: {new Date(lastUpdated).toLocaleString()}
-            </div>
-          )}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => refreshProviderRates({ force: true })}
+              disabled={ratesRefreshing || loading}
+              title="Force refresh provider rates from Google Drive/Sheets"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 transition hover:bg-slate-800 disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${ratesRefreshing ? "animate-spin" : ""}`} />
+              <span className="hidden sm:inline">Refresh rates</span>
+              <span className="sm:hidden">Rates</span>
+            </button>
+            {lastUpdated && (
+              <div className="hidden text-xs text-slate-400 sm:block">
+                Last sheet sync: {new Date(lastUpdated).toLocaleString()}
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
